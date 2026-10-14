@@ -1,0 +1,92 @@
+<mxfile host="app.diagrams.net" modified="2026-10-13T02:31:00.000Z" agent="Copilot" version="24.7.17" type="device">
+  <diagram id="ack-retention" name="ACK retention before and after">
+    <mxGraphModel dx="1500" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="950" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="title" value="Homa server ACK retention: before and after" style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=28;fontStyle=1;fontColor=#172B4D;" vertex="1" parent="1">
+          <mxGeometry x="40" y="24" width="1200" height="44" as="geometry"/>
+        </mxCell>
+        <mxCell id="subtitle" value="Completed responses retain server state until ACK — unless an operator opts into a finite retention deadline." style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=15;fontColor=#526581;" vertex="1" parent="1">
+          <mxGeometry x="42" y="68" width="1200" height="28" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="beforePanel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F7FB;strokeColor=#B8C7D9;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="35" y="120" width="735" height="755" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterPanel" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2FAF7;strokeColor=#92CDB5;strokeWidth=1.5;" vertex="1" parent="1">
+          <mxGeometry x="795" y="120" width="770" height="755" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeTitle" value="BEFORE / DEFAULT" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DCE6F2;strokeColor=#8BA6C1;fontColor=#19324D;fontSize=18;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="55" y="138" width="695" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterTitle" value="AFTER / OPT-IN DEADLINE" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5F0E4;strokeColor=#79B99A;fontColor=#164B36;fontSize=18;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="815" y="138" width="730" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeDefault" value="ack_timeout_ticks = 0 (default): unchanged, no expiry" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A943;fontColor=#664B00;fontSize=13;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="90" y="198" width="625" height="40" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterConfig" value="ack_timeout_ticks &gt; 0: deadline measured from response transmission completion" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E2F4EC;strokeColor=#79B99A;fontColor=#164B36;fontSize=13;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="850" y="198" width="660" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="beforeStep1" value="1  Response fully transmitted&lt;br&gt;&lt;b&gt;Server keeps RPC + response data&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontColor=#19324D;fontSize=15;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="265" width="605" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeStep2" value="2  No ACK received&lt;br&gt;After request_ack_ticks (default 2 ticks ≈ 2 ms), server sends NEED_ACK on every timer tick." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;fontColor=#19324D;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="372" width="605" height="88" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeStep3" value="3  ACK still cannot arrive&lt;br&gt;&lt;b&gt;Retained RPC and response persist; NEED_ACK repeats.&lt;/b&gt;&lt;br&gt;timeout_ticks does not expire this completed server RPC." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF0EE;strokeColor=#D97A70;fontColor=#6F2923;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="495" width="605" height="96" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeImpact" value="IMPACT IN A PARTITION&lt;br&gt;&lt;b&gt;1,000 maximum-size responses ≈ 1 GB retained payload&lt;/b&gt;&lt;br&gt;Up to ≈ 1 million NEED_ACK transmissions/s (nominal timer cadence)." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FCE2DF;strokeColor=#D97A70;fontColor=#6F2923;fontSize=14;align=center;verticalAlign=middle;spacing=9;" vertex="1" parent="1">
+          <mxGeometry x="100" y="655" width="605" height="108" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeLoop" value="ACK absent" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#C4554D;strokeWidth=2;dashed=1;endArrow=block;endFill=1;fontSize=12;fontColor=#8C342D;labelBackgroundColor=#F4F7FB;" edge="1" parent="1" source="beforeStep3" target="beforeStep2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeDown1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6C8EBF;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="beforeStep1" target="beforeStep2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeDown2" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6C8EBF;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="beforeStep2" target="beforeStep3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="beforeDown3" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6C8EBF;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="beforeStep3" target="beforeImpact">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="afterStep1" value="1  Response fully transmitted&lt;br&gt;&lt;b&gt;Server starts the ACK-retention clock&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#45A77B;fontColor=#164B36;fontSize=15;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="875" y="265" width="610" height="72" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterStep2" value="2  ACK absent&lt;br&gt;Server retains state for retransmission and duplicate suppression; NEED_ACK repeats after request_ack_ticks." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#45A77B;fontColor=#164B36;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="875" y="372" width="610" height="88" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterStep3" value="3  ACK arrives before deadline&lt;br&gt;Normal ACK path ends the RPC and allows response data to be reaped." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#45A77B;fontColor=#164B36;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="875" y="495" width="610" height="78" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterStep4" value="OR: deadline expires first&lt;br&gt;&lt;b&gt;Server retires the RPC; response buffers enter normal reaping.&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E2F4EC;strokeColor=#45A77B;fontColor=#164B36;fontSize=14;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="875" y="595" width="610" height="78" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterCaveat" value="TRADE-OFF&lt;br&gt;Duplicate suppression ends at expiry: a late retry may be treated as a new request. Configure the deadline above request_ack_ticks to allow an ACK request first. Expiry also limits time for RESEND-based response recovery.&lt;br&gt;&lt;br&gt;&lt;b&gt;If the client already received the full response but its ACK was lost, this timeout does not prove the client received it.&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF4D6;strokeColor=#D6A943;fontColor=#664B00;fontSize=13;align=left;verticalAlign=middle;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="875" y="700" width="610" height="132" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterDown1" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#45A77B;strokeWidth=2;endArrow=block;endFill=1;" edge="1" parent="1" source="afterStep1" target="afterStep2">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterAck" value="ACK received" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#318A62;strokeWidth=2;endArrow=block;endFill=1;fontSize=12;fontColor=#216546;labelBackgroundColor=#F2FAF7;" edge="1" parent="1" source="afterStep2" target="afterStep3">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterExpiry" value="Deadline reached" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D29A26;strokeWidth=2;endArrow=block;endFill=1;fontSize=12;fontColor=#795800;labelBackgroundColor=#F2FAF7;" edge="1" parent="1" source="afterStep2" target="afterStep4">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="afterNoteEdge" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#D6A943;strokeWidth=1.5;dashed=1;endArrow=none;" edge="1" parent="1" source="afterStep4" target="afterCaveat">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="footer" value="NEED_ACK requests the client ACK; RESEND requests missing response data. A client-process crash may leave its kernel able to ACK; host failure or partition can prevent the ACK from reaching the server." style="text;html=1;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontColor=#526581;" vertex="1" parent="1">
+          <mxGeometry x="45" y="886" width="1500" height="34" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
