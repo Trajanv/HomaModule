@@ -785,6 +785,21 @@ contains the external priority level corresponding to internal level
 .IR i .
 Each value must be an integer less than 8.
 .TP
+.IR ack_timeout_ticks
+Maximum number of timer ticks to retain a completed server RPC while waiting
+for its ACK. When this deadline expires, Homa discards the server RPC and
+queues its response buffers for normal reaping; a late retry may no longer be
+recognized as a duplicate. Zero (the default) disables expiration, preserving
+indefinite retention unless an ACK or an explicit peer/network error arrives,
+or the socket/module is shut down.
+Set this larger than
+.I request_ack_ticks
+if the server should have time to request an ACK before expiry. This is
+separate from
+.IR timeout_ticks ,
+which does not apply to completed server RPCs waiting for ACKs. Timer ticks
+run nominally once per millisecond.
+.TP
 .IR request_ack_ticks
 Servers maintain state for an RPC until the client has acknowledged receipt
 of the complete response message. Clients piggyback these acks on
@@ -793,7 +808,14 @@ If the server doesn't receive an ack within
 .IR request_ack_ticks
 timer ticks, then it will request an explicit ack. Larger values for
 this parameter reduce packet traffic but cause RPC state to be held longer
-on servers.
+on servers. State is retained until an ACK arrives unless a positive
+.I ack_timeout_ticks
+is configured.
+After this threshold, the server sends a NEED_ACK on each timer invocation
+until it receives an ACK or the
+.IR ack_timeout_ticks
+deadline expires. If the client has not received the complete response, it
+can request missing data with RESEND.
 .TP
 .IR resend_interval
 An integer value specifying how frequently resend requests may be sent
@@ -802,7 +824,7 @@ of "ticks" (see
 .I resend_ticks
 below). This value and
 .I timeout_resends
-should be chosen together.
+should be chosen together. The default is 5 ticks.
 .TP
 .IR resend_ticks
 An integer value specifying a number of "ticks", each of which corresponds
@@ -812,6 +834,7 @@ Homa will begin issuing resend requests for an RPC once this many ticks have
 elapsed without receiving expected data from the peer; the exact timing and
 spacing of those requests is determined by
 .IR resend_interval .
+The default is 5 ticks.
 The original plan was to send the first resend request relatively quickly,
 in order to minimize the delay caused by lost packets, then space out
 additional resends to minimize extra work created for an already-overloaded
@@ -827,6 +850,20 @@ server, it sends UNKNOWN, causing the client to restart. A larger value of
 .IR resend_ticks
 reduces the likelihood of restarts (but doesn't completely eliminate the
 problem).
+.TP
+.IR timeout_ticks
+An RPC is aborted if it has received no expected traffic for this many timer
+ticks. The default is 100 ticks (nominally 100 ms). For a client request whose
+.B START_MSG
+has not received a grant, the client retransmits the
+.B START_MSG
+after
+.I resend_ticks
+and then at intervals of
+.I resend_interval
+until a response arrives or this timeout expires. This timeout does not bound
+completed server RPCs waiting for ACKs; see
+.IR ack_timeout_ticks .
 .TP
 .IR rtt_bytes
 This configuration parameter is no longer supported; it has been split

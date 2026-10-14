@@ -120,12 +120,13 @@ this). If enough timeouts occur to conclude that a peer has crashed,
 then Homa aborts all RPCs for that peer.
 
 ## Server state cleanup
-Homa ensures at-most-once semantics for RPCs. In order to achieve this,
-a server must not discard its state for an RPC until it knows that the
-client has received the result. At some point after it receives the
-response for an RPC, the client will send an explicit *ack* to the
-server, indicating that the server can safely discard its state for
-the RPC. Acks can get sent in two ways. First, each DATA packet
+The server retains state for an RPC so it can recognize duplicate requests
+and retransmit its response. By default, this provides at-most-once handling
+while that state exists: the server does not discard the RPC until it knows
+that the client has received the response. After receiving the complete
+response, the client sends an explicit *ack* to the server, indicating that
+the server can safely discard its state for the RPC. Acks can get sent in two
+ways. First, each DATA packet
 has room for one ack, so if a client is having an ongoing conversation
 with a server, it can use future RPCs to ack older ones. Second, clients
 can send explicit ACK packets, each of which can carry multiple acks.
@@ -135,6 +136,32 @@ will use its timeout mechanism to request an explicit ack if all of the
 data has been transmitted for a response but no ack has been received.
 The server sends a NEED_ACK packet to request the ack, and the client
 will then respond with an ACK packet.
+
+In this implementation, the server retains the RPC and its response data
+while waiting for the ACK, and sends NEED_ACKs on each timer tick after
+`request_ack_ticks` has elapsed. By default, `ack_timeout_ticks` is zero, so
+there is no expiration deadline: if the client host is unreachable, completed
+RPC state and response buffers can remain allocated, and NEED_ACKs continue
+until an ACK or an explicit peer/network error arrives, or the socket/module
+is shut down. For example, 1,000
+unACKed maximum-size responses can retain roughly 1 GB of response payload,
+plus page rounding and RPC metadata, and cause up to about 1 million
+NEED_ACK transmissions per second (assuming the nominal 1 ms timer cadence).
+
+Setting `ack_timeout_ticks` to a positive value opts into a bounded retention
+period, measured from completion of response transmission. At expiry the
+server marks the RPC dead and queues its response buffers for normal reaping.
+This bounds active RPC retention; physical buffer release may follow the
+ordinary reaper schedule. Set the deadline larger than `request_ack_ticks` if
+the server should have time to request an ACK before expiry. Expiry also ends
+duplicate suppression for that RPC ID; a later retry may be treated as a new
+request. Applications requiring safe retries after that point need their own
+idempotency/deduplication policy.
+
+If the client has not received the complete response when it receives
+NEED_ACK, it can instead send RESEND for missing response data; the server
+needs the RPC state to retransmit it. An ACK-retention deadline therefore also
+limits the time available for response recovery.
 
 ## Priorities
 Homa attempts to implement an SRPT (shortest remaining processing time)

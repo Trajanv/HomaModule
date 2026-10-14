@@ -87,6 +87,73 @@ TEST_F(homa_timer, homa_timer_check_rpc__request_ack)
 	EXPECT_EQ(100, srpc->done_timer_ticks);
 	EXPECT_STREQ("xmit NEED_ACK", unit_log_get());
 }
+TEST_F(homa_timer, homa_timer_check_rpc__ack_timeout)
+{
+	struct homa_rpc *srpc = unit_server_rpc(&self->hsk, UNIT_OUTGOING,
+			self->client_ip, self->server_ip, self->client_port,
+			self->server_id, 100, 100);
+
+	ASSERT_NE(NULL, srpc);
+	self->homa.request_ack_ticks = 1;
+	self->homa.ack_timeout_ticks = 3;
+
+	homa_rpc_lock(srpc);
+	homa_xmit_data(srpc);
+
+	/* Start the retention timer when the response has been transmitted. */
+	unit_log_clear();
+	homa_timer_check_rpc(srpc);
+	EXPECT_EQ(self->homa.timer_ticks, srpc->done_timer_ticks);
+	EXPECT_EQ(RPC_OUTGOING, srpc->state);
+	EXPECT_STREQ("", unit_log_get());
+
+	/* Request an ACK before the retention deadline. */
+	self->homa.timer_ticks++;
+	unit_log_clear();
+	homa_timer_check_rpc(srpc);
+	EXPECT_EQ(RPC_OUTGOING, srpc->state);
+	EXPECT_STREQ("xmit NEED_ACK", unit_log_get());
+
+	/* At the deadline, discard the RPC instead of sending another NEED_ACK. */
+	self->homa.timer_ticks += 2;
+	unit_log_clear();
+	homa_timer_check_rpc(srpc);
+	EXPECT_EQ(RPC_DEAD, srpc->state);
+	EXPECT_STREQ("homa_rpc_end invoked", unit_log_get());
+#ifndef __STRIP__ /* See strip.py */
+	EXPECT_EQ(1, homa_metrics_per_cpu()->rpc_timeouts);
+	EXPECT_EQ(1, homa_metrics_per_cpu()->server_rpc_discards);
+#endif /* See strip.py */
+	homa_rpc_unlock(srpc);
+
+	EXPECT_EQ(NULL, homa_rpc_find_server(&self->hsk, self->client_ip,
+					    self->server_id));
+}
+TEST_F(homa_timer, homa_timer_check_rpc__ack_timeout_disabled_by_default)
+{
+	struct homa_rpc *srpc = unit_server_rpc(&self->hsk, UNIT_OUTGOING,
+			self->client_ip, self->server_ip, self->client_port,
+			self->server_id, 100, 100);
+
+	ASSERT_NE(NULL, srpc);
+	EXPECT_EQ(0, self->homa.ack_timeout_ticks);
+	self->homa.timeout_ticks = 1;
+	self->homa.request_ack_ticks = 1;
+
+	homa_rpc_lock(srpc);
+	homa_xmit_data(srpc);
+	homa_timer_check_rpc(srpc);
+	self->homa.timer_ticks += 10;
+	unit_log_clear();
+	homa_timer_check_rpc(srpc);
+	EXPECT_EQ(RPC_OUTGOING, srpc->state);
+	EXPECT_STREQ("xmit NEED_ACK", unit_log_get());
+	homa_rpc_unlock(srpc);
+
+	EXPECT_EQ(srpc, homa_rpc_find_server(&self->hsk, self->client_ip,
+					     self->server_id));
+	homa_rpc_unlock(srpc);
+}
 #ifndef __STRIP__ /* See strip.py */
 TEST_F(homa_timer, homa_timer_check_rpc__all_granted_bytes_received)
 {

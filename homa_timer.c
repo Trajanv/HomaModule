@@ -88,6 +88,19 @@ void homa_timer_check_rpc(struct homa_rpc *rpc)
 		if (rpc->done_timer_ticks == 0) {
 			rpc->done_timer_ticks = homa->timer_ticks;
 		} else {
+			u32 ack_wait_ticks = homa->timer_ticks
+					- rpc->done_timer_ticks;
+
+			if (homa->ack_timeout_ticks > 0 &&
+			    ack_wait_ticks >= (u32)homa->ack_timeout_ticks) {
+				INC_METRIC(rpc_timeouts, 1);
+				tt_record3("Discarding RPC id %d, peer 0x%x, ACK timeout after %u ticks",
+					   rpc->id,
+					   tt_addr(rpc->route->peer->addr),
+					   ack_wait_ticks);
+				homa_rpc_abort(rpc, -ETIMEDOUT);
+				return;
+			}
 			/* >= comparison that handles tick wrap-around. */
 			if ((rpc->done_timer_ticks + homa->request_ack_ticks
 					- 1 - homa->timer_ticks) & 1U << 31) {
