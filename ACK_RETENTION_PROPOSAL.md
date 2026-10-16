@@ -1,247 +1,152 @@
-# Proposal: bound server RPC state awaiting ACKs
+# Fix server RPC silence timeouts while waiting for ACKs
 
-## Finding
+## Motivation and finding
 
-The concern that a server can retain a completed RPC while waiting for its ACK
-is valid in the current implementation. This was checked against upstream
-`main` at commit `65cecd7831e8b24ba7bcd967288bb7ce26fe8eba` (2026-10-08).
+Discussion of ACK requirements and server-state retention for the Homa RFC
+prompted investigation of the completed server response path. Against upstream
+commit `65cecd7831e8b24ba7bcd967288bb7ce26fe8eba`, a server RPC waiting for an
+ACK resets `silent_ticks` and returns before the ordinary `timeout_ticks`
+check. No further client packets are needed to keep it alive.
 
-After a server finishes transmitting a response, `homa_timer_check_rpc` sends
-`NEED_ACK` after `request_ack_ticks`. It then enters the server-side
-`else if (!homa_is_client(rpc->id))` branch, resets `silent_ticks`, and
-returns. This happens for server RPCs in `RPC_OUTGOING` too, so they never
-reach the `timeout_ticks` check or `homa_rpc_abort`. The ordinary silence
-timeout therefore does **not** bound the lifetime of a completed server RPC
-waiting for its ACK. The ACK handler ends that RPC when an ACK arrives.
+If neither an ACK nor an explicit peer/network error arrives, the server
+retains the RPC and response fragments and continues sending NEED_ACKs.
+A client-process crash is not necessarily sufficient: its kernel can ACK or
+return an error. A host failure or partition preventing all feedback is the
+motivating case. This is demonstrated behavior, not a claim about production
+incident frequency.
 
-`NEED_ACK` does not itself reset `silent_ticks` (the incoming dispatcher
-resets it for DATA, GRANT, and BUSY), but that fact does not help here: the
-server-side early return prevents the timeout check from being reached.
-`timeout_ticks=100` is not a completed-server-ACK retention limit.
+An initial version of [PR #117](https://github.com/PlatformLab/HomaModule/pull/117)
+added an opt-in absolute retention deadline called `ack_timeout_ticks`.
+The maintainer confirmed that completed server RPCs were intended to honor
+the existing silence timeout. The revised implementation fixes that bug and
+does not add a configuration parameter. Earlier deadline experiments remain
+in branch history; the artifacts and diagram here describe the revised fix.
 
-For a client request whose `START_MSG` receives no grant or other response,
-the ordinary client RPC timer provides recovery. The defaults in
-`homa_utils.c` are `resend_ticks=5`, `resend_interval=5`, and
-`timeout_ticks=100`; timer ticks run nominally every 1 ms. Thus the client
-starts retransmitting the `START_MSG` after about 5 ms, repeats it at about
-5 ms intervals while silent, and aborts the RPC after about 100 ms without a
-response. Actual timing can vary with timer scheduling and incoming traffic;
-received packets can change the RPC's silence state. These client-side
-settings are separate from the proposed server-side `ack_timeout_ticks`.
+## Revised implementation
 
-Relevant code:
+- [`homa_timer.c`](./homa_timer.c) identifies a fully transmitted outgoing
+  server response as awaiting an ACK. Such RPCs no longer take the server-side
+  silence-reset/early-return exemption and reach the existing timeout check.
+- After checking timeout, ACK-waiting servers return before the generic
+  RESEND-request path: they need an ACK, not incoming response data.
+- [`homa_incoming.c`](./homa_incoming.c) resets an outgoing server RPC's
+  silence counter when a client RESEND arrives, so response recovery is
+  treated as feedback rather than mistaken for client failure.
+- Application processing and incomplete local response transmission retain
+  their existing exemptions.
+- Timeout uses normal server abort/reaping; physical buffer release is not
+  synchronous with the timer check.
 
-- [`homa_timer.c`](./homa_timer.c): sends NEED_ACK and applies the independent
-  silence-timeout logic; the server branch returns before that timeout check.
-- [`homa_incoming.c`](./homa_incoming.c): resets silence for DATA, GRANT, and
-  BUSY packets; handles NEED_ACK and ACK.
-- [`homa_rpc.c`](./homa_rpc.c): aborting a server RPC ends it; receiving its
-  ACK also ends it. Reaping frees the outgoing message fragments.
-- [`homa_outgoing.c`](./homa_outgoing.c): outgoing message data remains in
-  Homa's transmit page pool so it is available for retransmission.
-- [`homa_utils.c`](./homa_utils.c): initializes `timeout_ticks` to 100 and
-  `request_ack_ticks` to 2.
+This is a **silence timeout**, not an absolute response-retention deadline.
+Client feedback can postpone expiry. Sending NEED_ACK does not reset silence.
+An earlier ACK still ends the RPC normally. After state is discarded,
+response retransmission and duplicate suppression for that RPC are no longer
+available; sufficiently late duplicates may execute again.
 
-There is already a regression test that NEED_ACK does not reset the client's
-silence timer (`test/unit_homa_incoming.c`,
-`homa_dispatch_pkts__dont_reset_silent_ticks_on_NEED_ACK`). The timeout test
-in `test/unit_homa_timer.c` covers a client RPC; neither test establishes a
-cleanup deadline for the server's completed-response/ACK-wait case.
+## Existing defaults
 
-## Server-side impact
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `request_ack_ticks` | 2 ticks | Delay before requesting an ACK after observed response completion |
+| `timeout_ticks` | 100 ticks | Abort eligible RPCs whose silence reaches this threshold |
+| `resend_ticks` | 5 ticks | Begin client/message recovery after silence |
+| `resend_interval` | 5 ticks | Spacing between recovery attempts |
 
-Each unACKed completed server RPC remains active and retains RPC metadata and
-the outgoing response fragments in the transmit page pool. The response
-payload is a first-order estimate of retained memory; page rounding and
-per-RPC metadata add overhead. Homa's maximum message size is 1,000,000 bytes,
-so a maximum-size response can retain about 1 MB of response data, plus
-rounding and metadata, until the RPC is ended and reaped.
+Ticks run nominally every millisecond; scheduling affects wall-clock timing.
+For a scheduled client request with no grant, START_MSG retry uses the
+existing recovery path. This fix does not change client request retry policy.
+The RPC silence counter and ACK-request clock have different origins: the
+live fixed trace shows 99 elapsed ACK-clock ticks when silence reaches 100.
 
-For `N` completed RPCs awaiting ACKs, with response lengths `L_i`, payload
-retention is approximately `sum(L_i)` bytes, plus page rounding and metadata.
-Assuming one maximum-size response for each affected client:
+## Potential server impact
 
-| Stuck RPCs | Response payload retained (approx.) |
-|-----------:|------------------------------------:|
-| 100 | 100 MB |
-| 1,000 | 1 GB |
-| 10,000 | 10 GB |
+Retained payload is approximately the sum of outstanding response lengths,
+plus allocation rounding and metadata. For maximum-size 1,000,000-byte
+responses, 100 / 1,000 / 10,000 RPCs represent approximately 100 MB / 1 GB /
+10 GB of response payload. These are estimates, not measured capacity.
 
-These are payload-only estimates, not a prediction that a host can sustain
-that many such RPCs: memory pressure, buffer limits, and workload constraints
-may intervene first.
+The baseline sends NEED_ACK on each timer invocation after the threshold,
+without ACK-request backoff. At nominal 1 ms cadence, 1,000 stuck RPCs could
+attempt roughly one million NEED_ACK transmissions per second, before
+scheduling and transmit limits. The fix bounds this no-feedback behavior
+using the existing silence timeout; it does not introduce retry backoff.
 
-Once `request_ack_ticks` elapses (default 2 timer ticks, nominally 2 ms), the
-timer sends a `NEED_ACK` on every invocation while the RPC remains active.
-The timer is intended to run every millisecond, giving a nominal rate of up to
-about 1,000 `NEED_ACK`s/s per stuck RPC. Thus 1,000 stuck RPCs could produce
-about 1 million `NEED_ACK`s/s; 10,000 could produce about 10 million/s,
-before accounting for scheduling, packet drops, or transmit limits. There is
-no ACK-request backoff in this path.
+## Validation on H1 and H2 (2026-10-15)
 
-In the ACK-wait state, the server sends `NEED_ACK`, not `RESEND`. `RESEND` is
-used when the receiver of an incomplete message is missing response data; a
-live client can request retransmission from the server. Retaining the RPC and
-its outgoing fragments enables that recovery.
-
-### Failure scenario
-
-Suppose the server has completed responses for 1,000 clients, each response
-is 1 MB, and the clients become unreachable before their kernels can
-acknowledge receipt (for example, a rack-level partition or power/network
-failure during the transaction). The server can retain about 1 GB of response
-payload, plus RPC/page metadata, and attempt roughly 1 million `NEED_ACK`s
-each second. Neither `timeout_ticks` nor receipt of `NEED_ACK` bounds this
-state in the current server timer path. Explicit peer/network errors or
-socket shutdown can still end the RPC; the concern is loss of all such
-feedback during a host failure or partition.
-
-A client *process* crash alone is not equivalent to a client-host failure:
-the kernel may still receive the response and answer `NEED_ACK`. A client-host
-crash or partition can prevent the kernel ACK from reaching the server. If
-the client has not received the complete response, it may send `RESEND` while
-it is alive; loss of all communication leaves the server unable to distinguish
-a failed client from a delayed or partitioned one.
-
-## Semantics and design decision
-
-The ACK lets the server free retransmission data and RPC state after the
-client has received the response; retaining that state also supports duplicate
-suppression. If the server expires the state without an ACK, a later retry of
-the same RPC ID may arrive after its duplicate-suppression record is gone.
-Re-executing the request may violate at-most-once semantics.
-
-A finite retention timeout must therefore define the at-most-once guarantee's
-horizon and the treatment of late retries. If at-most-once must hold
-indefinitely, dropping the response context alone is insufficient; a durable
-or longer-lived deduplication record is needed. If a finite
-duplicate-suppression window is acceptable, specify its duration and make
-late-retry behavior explicit. Idempotent operations can tolerate some
-re-execution, but that is not a transport-level substitute for the ACK.
-
-## Implemented change
-
-The before/after flow is illustrated in
-[ACK_RETENTION_BEFORE_AFTER.drawio](./ACK_RETENTION_BEFORE_AFTER.drawio).
-
-The implementation adds `ack_timeout_ticks`, a separate server-side retention
-deadline measured from completion of response transmission. Its default is
-zero, preserving current behavior unless an operator opts into expiry. A
-positive value causes the server to stop requesting ACKs and retire the RPC at
-the deadline. Response buffers are queued for normal reaping, and physical
-release follows that schedule. The deadline should exceed
-`request_ack_ticks` if the server should first have time to request an ACK.
-Expiry also ends duplicate suppression, so a late retry may be processed as a
-new request after its duplicate record has expired. NEED_ACK can also prompt a
-client with an incomplete response to send RESEND; expiry limits the time
-available for that response recovery.
-
-The parameter is exposed at `/proc/sys/net/homa/ack_timeout_ticks` and
-documented in `man/homa.7` and `protocol.md`. Tests cover opt-in expiry and
-default-disabled retention beyond `timeout_ticks`; the existing ACK-handler
-test covers cleanup when the ACK arrives.
-
-## Validation on H1 and H2 (2026-10-14)
-
-Both hosts run Linux 6.17.8 on x86-64. Isolated copies of the changed source
-were used; running Homa modules and sysctl values were not replaced or changed.
+Both hosts ran x86-64 Linux 6.17.8.
 
 | Validation | H1 | H2 |
 |------------|----|----|
-| Kernel module build against running-kernel headers | Pass | Pass |
-| Focused unit tests, IPv6 default | 10/10 pass | 10/10 pass |
-| Focused unit tests, IPv4 default | 10/10 pass | 10/10 pass |
+| Kernel module build | Pass | Pass |
+| Timer/incoming unit suites, IPv6 default | 156/156 | 156/156 |
+| Timer/incoming unit suites, IPv4 default | 156/156 | 156/156 |
 
-The focused tests cover ACK requests, enabled ACK-retention expiry,
-default-disabled retention, client timeout, retransmission scheduling,
-START_MSG retry without a grant, NEED_ACK not resetting client silence,
-explicit and piggybacked ACK cleanup, and existing sysctl clamping behavior.
-The expiry test's expected log was corrected to include the normal
-`homa_rpc_end invoked` event.
+Four new regressions cover server ACK timeout, incomplete response
+transmission, client feedback postponing timeout, and RESEND resetting server
+silence. The in-service exemption test was strengthened. Existing suites cover
+ACK handling and client recovery. Two new regressions were run against
+unmodified upstream and failed as expected. Test summary markers were checked
+explicitly because this harness can exit zero despite failed assertions.
 
-The unit harness required host-specific compatibility settings: include the
-kernel's `linux/kconfig.h`, undefine `CONFIG_CC_HAS_NAMED_AS` and
-`CONFIG_DEBUG_LIST`, and define `CONFIG_TRACE_PREEMPT_TOGGLE=1` in a test-only
-forced-include header. C compilation used `-fcf-protection=branch`; the
-existing AddressSanitizer instrumentation remained enabled. These settings
-adapt the kernel headers to the user-space mocks, not the production module.
-H2 lacked the AddressSanitizer runtime and its configured package repository
-was unavailable, so the matching runtime from H1 (same GCC and glibc versions)
-was supplied only in H2's isolated test directory.
+AddressSanitizer stayed enabled. Unit builds used a test-only forced-include
+header that includes the kernel's `linux/kconfig.h`, undefines
+`CONFIG_CC_HAS_NAMED_AS` and `CONFIG_DEBUG_LIST`, and defines
+`CONFIG_TRACE_PREEMPT_TOGGLE=1`, plus `-fcf-protection=branch`.
+These settings adapt kernel headers to user-space mocks, not production
+module source. H2 used an isolated matching ASan runtime from H1; GCC and
+glibc versions matched. `git diff --check` passed.
 
-These results verify compilation and mocked RPC behavior, not live
-network-partition handling, measured memory reclamation, packet rates, or
-wall-clock timeout accuracy. No live module deployment or partition test was
-performed during that unit-test validation.
+## Live packet comparison
 
-## Live packet evidence on H1/H2 (2026-10-14)
+H1 temporarily loaded unmodified upstream, then the revised module. H2's
+existing client module was unchanged. Both cases used the existing defaults
+`request_ack_ticks=2` and `timeout_ticks=100`; neither module exposed an
+`ack_timeout_ticks` setting.
 
-A subsequent live experiment loaded the changed module temporarily on H1,
-using H2's existing module as the client. Both cases used the changed binary:
-`ack_timeout_ticks=0` reproduces the old retention policy; the second case
-sets it to `3`. `request_ack_ticks` remained at its default of `2`.
+Client OUTPUT rules blocked explicit ACKs and relevant ICMP errors only for
+the test flow, simulating an unreachable client without crashing a host.
+Blocking ICMP is necessary because a closed client socket can otherwise
+produce an error that legitimately cleans up the server RPC.
 
-**The timeout counts ticks, not NEED_ACK attempts.** With these settings,
-the server requests an ACK at elapsed tick 2 and expires at elapsed tick 3,
-before sending a second NEED_ACK. To allow three requests with the default
-ACK-request threshold, a deadline of 5 ticks would ordinarily allow requests
-at ticks 2, 3, and 4 before expiry at tick 5. A 3-tick deadline is a diagnostic
-example, not a recommended production retention period.
+The client utility ran ten warm-up RPCs plus one measured 100-byte RPC.
+Warm-ups can be acknowledged by subsequent requests; the comparison isolates
+the final RPC with no later request to piggyback its ACK.
 
-The test simulated client-host unreachability, rather than crashing a host:
-H2's client received responses and exited, while narrowly scoped OUTPUT rules
-blocked explicit Homa ACKs and ICMP destination-unreachable errors for H1's
-test port 29000. Blocking ICMP was important: with only ACK loss, this live
-client's kernel eventually returned an error after the socket closed, and
-Homa aborted the server RPC with `-ENOTCONN`. Thus retention is not literally
-unconditional until ACK or shutdown: an explicit peer/network error can also
-end it. A partition that prevents those errors from arriving leaves the
-server without that cleanup signal.
+| Final RPC evidence | Unmodified baseline | Silence-timeout fix |
+|--------------------|---------------------|---------------------|
+| Client / server RPC ID | 8620 / 8621 | 8642 / 8643 |
+| Captured NEED_ACK packets | 794 | 98 |
+| First NEED_ACK after response | 2.357 ms | 2.360 ms |
+| Last saved NEED_ACK after response | 810.346 ms | 101.705 ms |
+| Kernel trace | Still requesting ACK at elapsed tick 1,174 | Ordinary timeout and server abort with `-ETIMEDOUT` |
 
-The existing `homa_test --count 1 --length 100 rtt` utility sends 10 warm-up
-RPCs plus one measured RPC. Later requests can piggyback ACKs for warm-up RPCs;
-the comparison below isolates the final RPC, with no subsequent request to
-piggyback its ACK.
-
-| Evidence for final RPC | Default: timeout 0 | Enabled: timeout 3 |
-|------------------------|-------------------|--------------------|
-| Client / server RPC ID | 8554 / 8555 | 8576 / 8577 |
-| NEED_ACK packets saved in pcap | 1,621 | 1 |
-| First NEED_ACK after response packet | 2.692 ms | 2.292 ms |
-| Last captured NEED_ACK after response packet | 1,652.802 ms | 2.292 ms |
-| Kernel trace | Still retained until configuration switched; then expired at age 2,241 ticks | NEED_ACK at tick 2; discarded at tick 3 |
-
-Counts are packets actually saved, not exact transmission totals. The capture
-remained running for at least one second after each client invocation. In the
-enabled case no further NEED_ACK was captured, and the kernel trace confirms
-expiry rather than merely assuming an ACK arrived. Across the two phases,
-H2's rules counted 19 blocked ACK packets and 8 blocked ICMP errors.
+Counts are saved packets, not asserted exact transmission totals. Baseline
+capture/filter counts differ. The fixed capture remained running at least a
+second after client completion with no further NEED_ACKs for the expired RPC.
+The unit test independently checks expiry at `silent_ticks=100`; live traces
+confirm the normal timeout/abort path. Physical memory reclamation was not
+measured.
 
 Artifacts:
 
-- [Before capture](./test/ack_retention_evidence/before.pcap) and
+- [Before pcap](./test/ack_retention_evidence/before.pcap) and
   [decoded packets](./test/ack_retention_evidence/before-packets.csv).
-- [After capture](./test/ack_retention_evidence/after.pcap) and
+- [After pcap](./test/ack_retention_evidence/after.pcap) and
   [decoded packets](./test/ack_retention_evidence/after-packets.csv).
-- [Trace excerpts and drop counters](./test/ack_retention_evidence/observations.txt).
+- [Trace excerpts and method](./test/ack_retention_evidence/observations.txt).
+- [Updated before/after diagram](./ACK_RETENTION_BEFORE_AFTER.drawio).
 
-Captures use Linux cooked v2 framing (`tcpdump -i any`). Homa's receive
-offload consumed incoming traffic before it appeared in these captures, so
-they show server transmissions, not a complete bidirectional exchange.
-ACK-loss evidence comes from H2's OUTPUT-rule counters. The Homa opcode is
-byte 11 of the transport header: `0x17` is NEED_ACK and `0x18` is ACK.
-The sender RPC ID is the network-order 64-bit value at transport offset 20.
+Published evidence is anonymized: addresses use documentation-only
+`192.0.2.1` / `192.0.2.2`; link-layer identifiers, interface indices, and DATA
+payload patterns are cleared; pcap times are relative to the first packet.
+IPv4 checksums are recomputed. Packet order, RPC IDs, counts, and intervals
+are preserved. Trace peer addresses and command paths are anonymized.
 
-Published captures and CSVs are anonymized: server/client addresses use
-documentation-only `192.0.2.1` and `192.0.2.2`, link-layer addresses and
-interface identifiers are cleared, DATA payload patterns are cleared, and
-timestamps are relative to the first packet in each capture. IPv4 header
-checksums were recomputed. Packet counts, ordering, RPC IDs, and timing
-intervals are preserved. Trace peer addresses and command paths in the
-published excerpts are also anonymized.
+Captures use Linux cooked v2 framing. Receive offload means these are not
+complete bidirectional captures; client OUTPUT counters independently verify
+blocked feedback. Homa opcode is transport byte 11 (`0x17` NEED_ACK, `0x18`
+ACK), and the sender RPC ID is the network-order 64-bit field at offset 20.
 
-All test firewall tables were removed, H1's temporary module was unloaded,
-and H2's original module was left loaded. This validates continued ACK
-requests versus deadline-driven retirement under simulated unreachability;
-it does not measure physical buffer reclamation or reproduce an actual
-host crash.
+All test rules and H1's temporary module were removed afterward. H2's original
+module remained loaded. No actual host was crashed, and no raw evidence was
+published.

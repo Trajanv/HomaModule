@@ -294,13 +294,6 @@ struct homa {
 	int timeout_resends;
 
 	/**
-	 * @ack_timeout_ticks: Maximum time to retain a completed server RPC
-	 * while waiting for its ACK. Zero disables expiration.
-	 * Set externally via sysctl.
-	 */
-	int ack_timeout_ticks;
-
-	/**
 	 * @request_ack_ticks: How many timer ticks we'll wait for the
 	 * client to ack an RPC before explicitly requesting an ack.
 	 * Set externally via sysctl.

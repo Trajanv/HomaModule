@@ -1,48 +1,52 @@
-Homa ACK-retention packet experiment, 2026-10-14
-Published evidence is anonymized: documentation-only IPv4 addresses,
-cleared link-layer identifiers and DATA payload patterns, relative pcap
-timestamps, and recomputed IPv4 checksums. RPC IDs and intervals are unchanged.
-Trace peer addresses and command paths below are anonymized as well.
-Server H1: 192.0.2.1, Linux 6.17.8, test port 29000.
-Client H2: 192.0.2.2, Linux 6.17.8, existing Homa module.
-Same changed server binary in both phases; request_ack_ticks=2.
-Default phase: ack_timeout_ticks=0. Enabled phase: ack_timeout_ticks=3.
+Server ACK silence-timeout comparison, 2026-10-15
+Server H1: 192.0.2.1; client H2: 192.0.2.2; test port 29100.
+Both run x86-64 Linux 6.17.8.
+Addresses, trace peer addresses, and paths below are anonymized.
+Published captures clear link-layer identifiers and DATA payload patterns,
+use relative timestamps, and recompute IPv4 checksums. RPC IDs, packet
+ordering, intervals, and counts are unchanged.
 
-Final default-phase client/server RPC IDs: 8554 / 8555.
-Captured NEED_ACK count: 1621.
-First NEED_ACK: 2.692 ms after the outgoing response.
-Last saved NEED_ACK: 1652.802 ms after the outgoing response.
-The default RPC remained active until switching the timeout configuration.
-Trace at configuration switch (raw cycle timestamps, not wall-clock time):
-51883748657894874 [C35] Discarding RPC id 8555, peer 0xc0000202, ACK timeout after 2241 ticks
-51883748657896156 [C35] aborting server RPC: peer 0xc0000202, id 8555, error -110
+Both baseline and fixed module use request_ack_ticks=2, timeout_ticks=100.
+Neither exposes ack_timeout_ticks. This is a silence timeout, not an
+absolute retention deadline. RESEND feedback resets server silence.
 
-Final enabled-phase client/server RPC IDs: 8576 / 8577.
-Captured NEED_ACK count: 1.
-NEED_ACK: 2.292 ms after the outgoing response.
-Trace proving deadline-driven expiry:
-51883753587776102 [C35] Sent NEED_ACK for RPC id 8577 to peer 0xc0000202, port 32792, ticks 2
-51883753590198248 [C35] Discarding RPC id 8577, peer 0xc0000202, ACK timeout after 3 ticks
-51883753590198960 [C35] aborting server RPC: peer 0xc0000202, id 8577, error -110
+Baseline final client/server RPC IDs: 8620/8621.
+794 saved NEED_ACK packets; first 2.357 ms and last 810.346 ms after response.
+Trace (raw cycle timestamps, not wall-clock time):
+52164041686590116 [C01] Sent NEED_ACK for RPC id 8621 to peer 0xc0000202, port 32794, ticks 1171
+52164041688999216 [C01] Sent NEED_ACK for RPC id 8621 to peer 0xc0000202, port 32794, ticks 1172
+52164041691407210 [C01] Sent NEED_ACK for RPC id 8621 to peer 0xc0000202, port 32794, ticks 1173
+52164041693821956 [C01] Sent NEED_ACK for RPC id 8621 to peer 0xc0000202, port 32794, ticks 1174
 
-Client OUTPUT filtering simulated host unreachability for the test flow:
-ip saddr 192.0.2.2 ip daddr 192.0.2.1 ip protocol { 6, 146 } @th,16,16 29000 @th,88,8 0x18 counter drop
-ip saddr 192.0.2.2 ip daddr 192.0.2.1 ip protocol icmp icmp type destination-unreachable @th,224,16 29000 counter drop
-Counter snapshots (cumulative):
-Before-phase snapshot: 18 ACK packets / 1800 bytes; 7 ICMP packets / 532 bytes.
-After-phase snapshot: 19 ACK packets / 1900 bytes; 8 ICMP packets / 608 bytes.
+Fixed final client/server RPC IDs: 8642/8643.
+98 saved NEED_ACK packets; first 2.360 ms and last 101.705 ms after response.
+Trace confirms ordinary timeout followed by abort:
+52164052090247784 [C17] Sent NEED_ACK for RPC id 8643 to peer 0xc0000202, port 32795, ticks 98
+52164052092749640 [C17] Sent NEED_ACK for RPC id 8643 to peer 0xc0000202, port 32795, ticks 99
+52164052092750298 [C17] RPC id 8643, peer 0xc0000202, aborted because of timeout, state 5
+52164052092751186 [C17] aborting server RPC: peer 0xc0000202, id 8643, error -110
+The ACK clock shows 99 while silence reaches 100, because completion was
+first observed on the first timer pass. Unit tests assert silent_ticks=100.
 
-Capture command on H1:
-tcpdump -i any -nn -s 0 -U -w <phase>.pcap 'host 192.0.2.2 and (ip proto 146 or tcp port 29000)'
-Client command on H2, once per phase:
-./util/homa_test 192.0.2.1:29000 --count 1 --length 100 rtt
-This utility performs ten warm-up RPCs and one measured RPC.
-Only the final RPC is used for the retention comparison.
-Captures remained running for at least one second after client completion.
-Before: 1633 packets saved, 2218 received by filter, 0 kernel drops reported.
-After: 12 packets saved, 12 received by filter, 0 kernel drops reported.
-Saved-packet counts are not asserted to be exact transmission totals.
-Receive offload prevents a complete bidirectional view in these captures.
+Client OUTPUT filtering, limited to the test flow:
+ip saddr 192.0.2.2 ip daddr 192.0.2.1 ip protocol { 6, 146 } @th,16,16 29100 @th,88,8 0x18 counter drop
+ip saddr 192.0.2.2 ip daddr 192.0.2.1 ip protocol icmp icmp type destination-unreachable @th,224,16 29100 counter drop
+Final cumulative counters across both phases:
+36 ACK packets / 3600 bytes; 11 ICMP packets / 836 bytes.
 
-H1's temporary module and all test firewall tables were removed afterward.
-H2's existing module was unchanged. No actual host was crashed.
+Client command, once per phase:
+./util/homa_test 192.0.2.1:29100 --count 1 --length 100 rtt
+Ten warm-ups plus one measured RPC; only the last RPC is compared.
+Capture command:
+tcpdump -i any -nn -s 0 -U -w <phase>.pcap 'host 192.0.2.2 and ((ip proto 146 and (ip[20:2] = 29100 or ip[22:2] = 29100)) or tcp port 29100)'
+Capture remained running at least one second after each client invocation.
+Baseline: 806 packets saved, 1186 received by filter, 0 kernel drops reported.
+Fixed: 110 packets saved, 110 received by filter, 0 kernel drops reported.
+Saved counts are not asserted exact transmission totals.
+Receive offload prevents a complete bidirectional view.
+No physical buffer reclamation measurement or actual host crash.
+
+Kernel module build passed on both hosts. Timer/incoming suites passed
+156/156 with IPv6 and 156/156 with IPv4 on each host, ASan enabled.
+Two new regressions failed against unmodified upstream as expected.
+H1 temporary module unloaded; H2 existing module unchanged; test rules removed.
