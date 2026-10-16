@@ -43,6 +43,42 @@ An earlier ACK still ends the RPC normally. After state is discarded,
 response retransmission and duplicate suppression for that RPC are no longer
 available; sufficiently late duplicates may execute again.
 
+## `timeout_ticks` versus the earlier `ack_timeout_ticks` proposal
+
+The earlier parameter name was `ack_timeout_ticks` (not `ac_timeout_ticks`).
+It was introduced in the initial proposal, not as an existing upstream
+setting, and is removed from the revised implementation.
+
+| Behavior | Existing `timeout_ticks`, with this bug fix | Earlier proposed `ack_timeout_ticks` |
+|----------|--------------------------------------------|--------------------------------------|
+| Purpose | Detect loss of peer feedback for eligible RPCs, including completed server responses | Impose a separate absolute limit on completed server response retention |
+| Clock | Consecutive silent timer ticks for the RPC | Elapsed timer ticks after response completion is observed |
+| Default | 100 ticks, nominally about 100 ms | 0, meaning the additional deadline was disabled |
+| Client RESEND for the same RPC | Resets that RPC's silence counter and postpones its timeout | Does not restart the absolute retention deadline |
+| Traffic for another RPC | Does not reset this RPC's silence counter | Does not restart the deadline |
+| Server sends NEED_ACK | Does not reset silence | Does not restart the deadline |
+| ACK received | Normal RPC cleanup | Normal RPC cleanup |
+| Expiration | Normal timeout abort and response-buffer reaping | Retire the completed server RPC at the separate deadline |
+| Status in revised PR | Reused; the ACK-wait path now reaches its existing timeout check | Removed; no new sysctl |
+
+For example, with `timeout_ticks=100`, a client RESEND received after 80
+silent ticks resets the same RPC's `silent_ticks` to zero. If no further
+feedback arrives, it can then time out after another 100 silent ticks.
+An absolute `ack_timeout_ticks=100` deadline would still expire near its
+original completion-based deadline, even if recovery was actively ongoing.
+These are timer-tick examples, not exact wall-clock guarantees.
+
+The reset in [`homa_resend_pkt`](./homa_incoming.c) applies to the outgoing
+server RPC matched by the packet's RPC identity. It does not treat activity
+from unrelated calls as evidence that this RPC is alive. A RESEND requests
+missing response data; it is not an ACK of the complete response.
+
+The maintainer's intended behavior is the silence-based policy. Fixing the
+early return implements that policy without introducing a second timeout
+knob or imposing an absolute deadline on active response recovery.
+`request_ack_ticks` remains separate: it controls when the server starts
+requesting an ACK, not when the RPC expires or how many attempts it makes.
+
 ## Existing defaults
 
 | Setting | Default | Purpose |
